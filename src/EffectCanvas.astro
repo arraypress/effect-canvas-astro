@@ -1,0 +1,598 @@
+---
+/**
+ * EffectCanvas — GPU shader background for heroes, headers + sections.
+ *
+ *   <div class="relative">
+ *     <EffectCanvas name="aurora" />
+ *     <div class="relative z-10">…content…</div>
+ *   </div>
+ *
+ * Renders a full-bleed, absolutely-positioned <canvas> that draws one
+ * of six built-in fragment shaders (see `EffectName` in
+ * src/types/effects.ts):
+ *
+ *   aurora | mesh | waves | grid | particles | grain
+ *
+ * Props (all optional except `name` — see EffectConfig for full docs):
+ *
+ *   name         which shader to render
+ *   colors       up to 3 hex colours; defaults derive from the LIVE
+ *                `--color-accent` token, so presets re-tint effects
+ *                automatically
+ *   speed        animation speed multiplier (0–4, default 1)
+ *   intensity    brightness/contrast multiplier (0–2, default 1)
+ *   opacity      uniform CSS opacity on the canvas (0–1, default 1)
+ *   interactive  smoothed mouse-tracking uniform (default false)
+ *   blend        CSS mix-blend-mode (default 'normal')
+ *   fade         edge mask: 'bottom' (default) | 'top' | 'both' | 'none'
+ *   class        extra classes for the canvas element
+ *
+ * Usage from MDX / sections:
+ *
+ *   import EffectCanvas from '@/components/effects/EffectCanvas.astro';
+ *   <EffectCanvas name="mesh" speed={0.7} intensity={0.8} interactive />
+ *
+ * Wired into the homepage hero via `siteConfig.hero.effect` — see
+ * HomeHero.astro and the HeroConfig type.
+ *
+ * Guarantees:
+ *   - `prefers-reduced-motion: reduce` → one static frame, no loop.
+ *   - Pauses when offscreen (IntersectionObserver) or tab hidden.
+ *   - Device-pixel-ratio capped at 1.75 — decorative layers don't
+ *     get to quadruple the fragment bill on retina screens.
+ *   - No WebGL → graceful CSS radial-gradient fallback, same colours.
+ *   - `pointer-events: none` always; `aria-hidden` always.
+ *   - Survives View Transitions (re-binds on `astro:after-swap`,
+ *     loops self-terminate when their canvas leaves the DOM).
+ */
+import type { EffectConfig } from './types';
+
+interface Props extends EffectConfig {
+	/** Extra class names merged onto the canvas element. */
+	class?: string;
+}
+
+const {
+	name,
+	colors,
+	speed = 1,
+	intensity = 1,
+	opacity = 1,
+	interactive = false,
+	blend = 'normal',
+	fade = 'bottom',
+	class: className,
+} = Astro.props;
+---
+<canvas
+	class:list={['effect-canvas', fade !== 'none' && `effect-canvas--fade-${fade}`, className]}
+	data-effect={name}
+	data-effect-speed={speed}
+	data-effect-intensity={intensity}
+	data-effect-colors={colors && colors.length > 0 ? colors.join(',') : undefined}
+	data-effect-interactive={interactive ? 'on' : undefined}
+	style={`opacity: ${opacity};${blend !== 'normal' ? ` mix-blend-mode: ${blend};` : ''}`}
+	aria-hidden="true"
+></canvas>
+
+<script>
+	/**
+	 * EffectCanvas runtime — one shared module for every effect canvas
+	 * on the page (Astro de-dupes processed scripts, so this executes
+	 * once no matter how many instances render).
+	 *
+	 * Architecture:
+	 *   - SHADERS holds the six fragment-shader bodies; HELPERS holds
+	 *     shared GLSL (hash / value noise / fbm) prepended to each.
+	 *   - mount() compiles the program for one canvas, sizes it (DPR
+	 *     capped), and starts a rAF loop gated on three switches:
+	 *     viewport visibility, tab visibility, reduced-motion.
+	 *   - Loops self-terminate when their canvas is removed from the
+	 *     DOM (View Transition swaps), and init() re-binds new ones
+	 *     via `astro:after-swap`.
+	 */
+	(function () {
+		const BOUND = Symbol.for('apEffectCanvasBound');
+		if ((globalThis as any)[BOUND]) return;
+		(globalThis as any)[BOUND] = true;
+
+		const prefersReduced =
+			typeof window !== 'undefined' &&
+			window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+		/** Max device-pixel-ratio a decorative layer is allowed to render at. */
+		const DPR_CAP = 1.75;
+
+		/* ---------------------------------------------------------- *
+		 * GLSL
+		 * ---------------------------------------------------------- */
+
+		/** Fullscreen-triangle vertex shader shared by every effect. */
+		const VERT = 'attribute vec2 a;void main(){gl_Position=vec4(a,0.,1.);}';
+
+		/**
+		 * Shared fragment header: uniforms + hash / value-noise / fbm
+		 * helpers. Prepended to every shader body in SHADERS.
+		 *
+		 * Uniform contract:
+		 *   u_res        canvas size in physical px
+		 *   u_time       seconds elapsed × the instance's speed prop
+		 *   u_c1..u_c3   the three effect colours (linear-ish RGB 0–1)
+		 *   u_intensity  brightness multiplier from the intensity prop
+		 *   u_mouse      smoothed cursor in 0–1 UV space (0.5,0.5 idle)
+		 */
+		const HELPERS = `
+precision highp float;
+uniform vec2 u_res;
+uniform float u_time;
+uniform vec3 u_c1;
+uniform vec3 u_c2;
+uniform vec3 u_c3;
+uniform float u_intensity;
+uniform vec2 u_mouse;
+float hash(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}
+float vnoise(vec2 p){vec2 i=floor(p);vec2 f=fract(p);f=f*f*(3.-2.*f);
+	float a=hash(i),b=hash(i+vec2(1.,0.)),c=hash(i+vec2(0.,1.)),d=hash(i+vec2(1.,1.));
+	return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);}
+float fbm(vec2 p){float v=0.;float a=.5;for(int i=0;i<5;i++){v+=a*vnoise(p);p*=2.03;a*=.5;}return v;}
+`;
+
+		/**
+		 * The shader registry. Every body defines main(), reads the
+		 * uniform contract above, and writes vec4(rgb, alpha) where
+		 * alpha tracks brightness — the canvas is composited over the
+		 * section background, so dark pixels stay transparent.
+		 */
+		const SHADERS: Record<string, string> = {
+			/* Slow curtains of accent light drifting over fbm noise. */
+			aurora: `
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	vec2 p=vec2(uv.x*u_res.x/u_res.y,uv.y);
+	p+=(u_mouse-.5)*.12;
+	float t=u_time*.05;
+	float n1=fbm(p*vec2(1.1,2.1)+vec2(t,-t*.55));
+	float n2=fbm(p*vec2(1.7,2.8)-vec2(t*.7,t*.35)+7.31);
+	float curtain=smoothstep(.32,.95,n1)*(.35+.65*n2);
+	float falloff=smoothstep(.0,.55,uv.y)*.9+.1;
+	vec3 col=(u_c1*n1+u_c3*n2*.6)*curtain*falloff;
+	col+=u_c2*.22*smoothstep(.45,1.,n2)*falloff;
+	col*=u_intensity;
+	float a=clamp(max(max(col.r,col.g),col.b)*1.5,0.,1.);
+	gl_FragColor=vec4(col,a);
+}`,
+
+			/* Four orbiting radial blobs — the animated mesh-gradient. */
+			mesh: `
+float blob(vec2 p,vec2 c,float r){float d=length(p-c);return r*r/(d*d+r*r);}
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float ar=u_res.x/u_res.y;
+	vec2 p=(uv-.5)*vec2(ar,1.);
+	float t=u_time*.22;
+	vec2 m=(u_mouse-.5)*vec2(ar,1.);
+	vec3 col=vec3(0.);
+	col+=u_c1*.50*blob(p,vec2(sin(t*.70)*.55,cos(t*.50)*.34),.30);
+	col+=u_c2*.45*blob(p,vec2(cos(t*.40+2.)*.60,sin(t*.60+1.)*.40),.36);
+	col+=u_c3*.40*blob(p,vec2(sin(t*.50+4.)*.50,cos(t*.34+3.)*.44),.28);
+	col+=u_c1*.20*blob(p,m,.22);
+	col*=u_intensity;
+	float a=clamp(max(max(col.r,col.g),col.b)*1.3,0.,1.);
+	gl_FragColor=vec4(col,a);
+}`,
+
+			/* Three glowing waveform lines — audio-signal look. */
+			waves: `
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float ar=u_res.x/u_res.y;
+	float t=u_time;
+	vec3 col=vec3(0.);
+	for(int i=0;i<3;i++){
+		float fi=float(i);
+		float yy=.5+(fi-1.)*.15+(u_mouse.y-.5)*.05;
+		float w=sin(uv.x*(4.5+fi*1.4)*ar*.6+t*(.45+fi*.2)+fi*2.1)
+		       *sin(uv.x*1.6*ar-t*.3+fi*.7);
+		float amp=.09+.045*fi;
+		float d=abs(uv.y-yy-w*amp);
+		vec3 c=i==0?u_c1:(i==1?u_c2:u_c3);
+		col+=c*(.005/(d+.004))*.55;
+	}
+	col*=u_intensity;
+	float a=clamp(max(max(col.r,col.g),col.b)*1.2,0.,1.);
+	gl_FragColor=vec4(col,a);
+}`,
+
+			/* Perspective floor grid scrolling to the horizon + glow line. */
+			grid: `
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float ar=u_res.x/u_res.y;
+	float horizon=.62;
+	vec3 col=vec3(0.);
+	if(uv.y<horizon){
+		float z=(horizon-uv.y)+.015;
+		float pz=1./z;
+		vec2 g=vec2((uv.x-.5)*ar*pz*.9,pz*.5+u_time*1.1);
+		float dx=abs(fract(g.x+.5)-.5);
+		float dy=abs(fract(g.y+.5)-.5);
+		float fog=smoothstep(.0,.45,z);
+		float line=(.022/(dx+.018)+.022/(dy+.018))*.5;
+		col+=u_c1*line*fog*.85;
+	}
+	col+=u_c2*exp(-abs(uv.y-horizon)*22.)*.55;
+	col+=u_c3*exp(-abs(uv.y-horizon)*5.)*.10;
+	col*=u_intensity;
+	float a=clamp(max(max(col.r,col.g),col.b)*1.35,0.,1.);
+	gl_FragColor=vec4(col,a);
+}`,
+
+			/* Three parallax layers of drifting, twinkling specks. */
+			particles: `
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float ar=u_res.x/u_res.y;
+	vec2 p=vec2(uv.x*ar,uv.y);
+	vec3 col=vec3(0.);
+	for(int i=0;i<3;i++){
+		float fi=float(i);
+		float scale=14.+fi*12.;
+		vec2 drift=vec2(u_time*(.018+fi*.012),u_time*.008*(fi-1.));
+		drift+=(u_mouse-.5)*.04*(fi+1.);
+		vec2 g=p*scale+drift*scale;
+		vec2 id=floor(g);
+		vec2 f=fract(g);
+		vec2 pos=vec2(hash(id),hash(id+7.7))*.7+.15;
+		float d=length(f-pos);
+		float tw=.5+.5*sin(u_time*(.8+hash(id)*2.4)+hash(id)*6.28);
+		vec3 c=i==0?u_c1:(i==1?u_c2:u_c3);
+		col+=c*(.03/(d+.035))*tw*(.55-fi*.13);
+	}
+	col*=u_intensity;
+	float a=clamp(max(max(col.r,col.g),col.b)*1.6,0.,1.);
+	gl_FragColor=vec4(col,a);
+}`,
+
+			/* Liquid surface — flowing accent "water" where pointer movement
+			 * spawns damped, expanding ripple rings. Renders OPAQUE (it's a
+			 * surface fill, not a glow overlay): built for CTAs/buttons via
+			 * `.cta--fx`, also works as a full section backdrop.
+			 * Ripple state arrives in u_rip[8]: xy = uv origin, z = birth
+			 * time in shader seconds, w = strength (0 = empty slot). */
+			liquid: `
+uniform vec4 u_rip[8];
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float ar=u_res.x/u_res.y;
+	vec2 p=vec2(uv.x*ar,uv.y);
+	float t=u_time;
+	float h=(fbm(p*2.6+vec2(t*.10,-t*.07))-.5)*.5;
+	h+=(fbm(p*5.2-vec2(t*.06,t*.04))-.5)*.22;
+	for(int i=0;i<8;i++){
+		vec4 r=u_rip[i];
+		float age=t-r.z;
+		if(r.w<=0.||age<0.)continue;
+		vec2 rp=vec2(r.x*ar,r.y);
+		float d=length(p-rp);
+		h+=sin(d*42.-age*7.5)*exp(-d*6.5)*exp(-age*2.4)*r.w*.6;
+	}
+	vec3 base=mix(u_c2,u_c1,clamp(.62+h*1.1,0.,1.));
+	float spec=smoothstep(.16,.44,h);
+	vec3 col=base+u_c3*spec*.25+vec3(spec*.22);
+	col*=u_intensity;
+	gl_FragColor=vec4(col,1.);
+}`,
+
+			/* Animated film grain + faint accent vignette. The quiet one. */
+			grain: `
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float g=hash(uv*u_res*.5+fract(u_time*.7)*vec2(17.,31.));
+	float vig=1.-smoothstep(.1,.8,distance(uv,vec2(.5,.45)));
+	vec3 col=u_c1*vig*.10+u_c2*(1.-vig)*.03;
+	col+=vec3(g)*.06;
+	col*=u_intensity;
+	float a=clamp((g*.5+vig*.55)*.5*u_intensity,0.,1.);
+	gl_FragColor=vec4(col,a);
+}`,
+		};
+
+		/* ---------------------------------------------------------- *
+		 * Colour resolution
+		 * ---------------------------------------------------------- */
+
+		/**
+		 * Parse a CSS colour into RGB 0–1. Accepts #rgb / #rrggbb and
+		 * rgb()/rgba() strings; anything else → null (caller falls
+		 * back to the token-derived palette).
+		 */
+		function parseColor(input: string): [number, number, number] | null {
+			const s = input.trim();
+			const hex = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i)?.[1];
+			if (hex) {
+				const full = hex.length === 3 ? hex.split('').map(c => c + c).join('') : hex;
+				return [0, 2, 4].map(i => parseInt(full.slice(i, i + 2), 16) / 255) as [number, number, number];
+			}
+			const rgb = s.match(/^rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/i);
+			if (rgb) return [Number(rgb[1]) / 255, Number(rgb[2]) / 255, Number(rgb[3]) / 255];
+			return null;
+		}
+
+		/** Rotate an RGB colour's hue by `deg` degrees (via HSL). */
+		function hueRotate(rgb: [number, number, number], deg: number): [number, number, number] {
+			const [r, g, b] = rgb;
+			const max = Math.max(r, g, b), min = Math.min(r, g, b);
+			const l = (max + min) / 2;
+			if (max === min) return rgb; // achromatic — nothing to rotate
+			const d = max - min;
+			const sat = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+			let h = max === r ? (g - b) / d + (g < b ? 6 : 0)
+				: max === g ? (b - r) / d + 2
+				: (r - g) / d + 4;
+			h = ((h / 6 + deg / 360) % 1 + 1) % 1;
+			const q = l < 0.5 ? l * (1 + sat) : l + sat - l * sat;
+			const p = 2 * l - q;
+			const f = (t: number) => {
+				t = ((t % 1) + 1) % 1;
+				if (t < 1 / 6) return p + (q - p) * 6 * t;
+				if (t < 1 / 2) return q;
+				if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+				return p;
+			};
+			return [f(h + 1 / 3), f(h), f(h - 1 / 3)];
+		}
+
+		/**
+		 * Resolve the three shader colours for one canvas. Priority:
+		 * explicit data-effect-colors entries, then token-derived
+		 * defaults — c1 = `--color-accent`, c2 = accent dimmed 55%,
+		 * c3 = accent hue-rotated 36° for depth. Reading the token at
+		 * mount time (not build time) means preset/theme switches
+		 * re-tint effects with zero config.
+		 */
+		function resolveColors(el: HTMLElement): [number, number, number][] {
+			const styles = getComputedStyle(document.documentElement);
+			const accent =
+				parseColor(styles.getPropertyValue('--color-accent')) ?? [0, 0.89, 0.45];
+			const defaults: [number, number, number][] = [
+				accent,
+				accent.map(c => c * 0.45) as [number, number, number],
+				hueRotate(accent, 36),
+			];
+			const custom = (el.dataset.effectColors ?? '')
+				.split(',')
+				.map(parseColor)
+				.filter((c): c is [number, number, number] => c !== null);
+			return [custom[0] ?? defaults[0], custom[1] ?? defaults[1], custom[2] ?? defaults[2]];
+		}
+
+		/* ---------------------------------------------------------- *
+		 * WebGL bootstrap
+		 * ---------------------------------------------------------- */
+
+		/** Compile one shader stage; logs + returns null on failure. */
+		function compile(gl: WebGLRenderingContext, type: number, src: string): WebGLShader | null {
+			const sh = gl.createShader(type);
+			if (!sh) return null;
+			gl.shaderSource(sh, src);
+			gl.compileShader(sh);
+			if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+				console.warn('[EffectCanvas] shader compile failed:', gl.getShaderInfoLog(sh));
+				gl.deleteShader(sh);
+				return null;
+			}
+			return sh;
+		}
+
+		/**
+		 * CSS fallback when WebGL is unavailable (blocked, ancient GPU,
+		 * software rendering disabled): paint layered radial gradients
+		 * from the same palette so the section still gets its glow.
+		 */
+		function cssFallback(canvas: HTMLCanvasElement, colors: [number, number, number][]) {
+			const css = (c: [number, number, number], a: number) =>
+				`rgba(${c.map(v => Math.round(v * 255)).join(',')},${a})`;
+			canvas.style.background = [
+				`radial-gradient(ellipse 55% 70% at 75% 25%, ${css(colors[0], 0.14)}, transparent 65%)`,
+				`radial-gradient(ellipse 60% 70% at 20% 75%, ${css(colors[2], 0.10)}, transparent 65%)`,
+			].join(',');
+		}
+
+		/** Mount the renderer on one canvas. Idempotent per element. */
+		function mount(canvas: HTMLCanvasElement) {
+			if ((canvas as any).__fxInit) return;
+			(canvas as any).__fxInit = true;
+
+			const body = SHADERS[canvas.dataset.effect ?? ''];
+			if (!body) {
+				console.warn(`[EffectCanvas] unknown effect "${canvas.dataset.effect}"`);
+				return;
+			}
+
+			const speed = Math.min(4, Math.max(0, Number(canvas.dataset.effectSpeed ?? 1) || 1));
+			const intensity = Math.min(2, Math.max(0, Number(canvas.dataset.effectIntensity ?? 1) || 1));
+			const interactive = canvas.dataset.effectInteractive === 'on';
+			const colors = resolveColors(canvas);
+
+			const gl = canvas.getContext('webgl', {
+				alpha: true,
+				premultipliedAlpha: false,
+				antialias: false,
+				depth: false,
+				stencil: false,
+				powerPreference: 'low-power',
+			}) as WebGLRenderingContext | null;
+			if (!gl) { cssFallback(canvas, colors); return; }
+
+			const vs = compile(gl, gl.VERTEX_SHADER, VERT);
+			const fs = compile(gl, gl.FRAGMENT_SHADER, HELPERS + body);
+			if (!vs || !fs) { cssFallback(canvas, colors); return; }
+			const prog = gl.createProgram()!;
+			gl.attachShader(prog, vs);
+			gl.attachShader(prog, fs);
+			gl.linkProgram(prog);
+			if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+				console.warn('[EffectCanvas] program link failed:', gl.getProgramInfoLog(prog));
+				cssFallback(canvas, colors);
+				return;
+			}
+			gl.useProgram(prog);
+
+			/* Fullscreen triangle — one draw call, no index buffer. */
+			const buf = gl.createBuffer();
+			gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+			const loc = gl.getAttribLocation(prog, 'a');
+			gl.enableVertexAttribArray(loc);
+			gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+			const u = {
+				res:       gl.getUniformLocation(prog, 'u_res'),
+				time:      gl.getUniformLocation(prog, 'u_time'),
+				c1:        gl.getUniformLocation(prog, 'u_c1'),
+				c2:        gl.getUniformLocation(prog, 'u_c2'),
+				c3:        gl.getUniformLocation(prog, 'u_c3'),
+				intensity: gl.getUniformLocation(prog, 'u_intensity'),
+				mouse:     gl.getUniformLocation(prog, 'u_mouse'),
+				/* Only resolves for shaders that declare u_rip (liquid). */
+				rip:       gl.getUniformLocation(prog, 'u_rip[0]'),
+			};
+			gl.uniform3f(u.c1, ...colors[0]);
+			gl.uniform3f(u.c2, ...colors[1]);
+			gl.uniform3f(u.c3, ...colors[2]);
+			gl.uniform1f(u.intensity, intensity);
+
+			/* --- sizing (DPR-capped, follows the element box) --- */
+			function resize() {
+				const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
+				const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+				const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+				if (canvas.width !== w || canvas.height !== h) {
+					canvas.width = w;
+					canvas.height = h;
+					gl!.viewport(0, 0, w, h);
+				}
+				gl!.uniform2f(u.res, canvas.width, canvas.height);
+			}
+			resize();
+			new ResizeObserver(resize).observe(canvas);
+
+			/* --- smoothed mouse (only wired when interactive) --- */
+			let mx = 0.5, my = 0.5;        // smoothed, fed to the uniform
+			let tx = 0.5, ty = 0.5;        // raw target from pointermove
+			if (interactive && !prefersReduced) {
+				const host = canvas.parentElement ?? canvas;
+				host.addEventListener('pointermove', e => {
+					const r = canvas.getBoundingClientRect();
+					tx = (e.clientX - r.left) / Math.max(1, r.width);
+					ty = 1 - (e.clientY - r.top) / Math.max(1, r.height);
+				}, { passive: true });
+				host.addEventListener('pointerleave', () => { tx = 0.5; ty = 0.5; }, { passive: true });
+			}
+
+			/* --- render loop, gated on visibility switches --- */
+			const start = performance.now();
+			let inView = true;
+			let rafId = 0;
+
+			/** Current elapsed time in shader seconds (same formula the
+			 *  frame loop feeds u_time, so ripple birth stamps line up). */
+			const shaderTime = (now: number) => ((now - start) / 1000) * speed;
+
+			/* --- liquid ripples: pointer movement spawns expanding rings.
+			 * Fixed-size ring buffer of 8 ripples (matching u_rip[8]); old
+			 * entries are simply overwritten — their exp(-age) decay has
+			 * long made them invisible. Throttled by travel distance + a
+			 * minimum interval so a fast swipe reads as a wake, not noise. */
+			const ripples = new Float32Array(8 * 4);
+			if (u.rip && !prefersReduced) {
+				let slot = 0;
+				let lastX = -1, lastY = -1, lastAt = 0;
+				const spawn = (e: PointerEvent, strength: number, force = false) => {
+					const r = canvas.getBoundingClientRect();
+					if (r.width < 1 || r.height < 1) return;
+					const x = (e.clientX - r.left) / r.width;
+					const y = 1 - (e.clientY - r.top) / r.height;
+					const now = performance.now();
+					if (!force) {
+						const travelled = Math.hypot(x - lastX, y - lastY);
+						if (travelled < 0.07 && now - lastAt < 120) return;
+					}
+					lastX = x; lastY = y; lastAt = now;
+					ripples.set([x, y, shaderTime(now), strength], slot * 4);
+					slot = (slot + 1) % 8;
+				};
+				const host = canvas.parentElement ?? canvas;
+				host.addEventListener('pointermove', e => spawn(e, 0.55), { passive: true });
+				host.addEventListener('pointerdown', e => spawn(e, 1.3, true), { passive: true });
+			}
+
+			function frame(now: number) {
+				rafId = 0;
+				if (!canvas.isConnected) return;            // removed by a VT swap — stop
+				if (!inView || document.hidden) return;     // paused — observer resumes us
+				mx += (tx - mx) * 0.06;
+				my += (ty - my) * 0.06;
+				gl!.uniform2f(u.mouse, mx, my);
+				gl!.uniform1f(u.time, shaderTime(now));
+				if (u.rip) gl!.uniform4fv(u.rip, ripples);
+				gl!.drawArrays(gl!.TRIANGLES, 0, 3);
+				rafId = requestAnimationFrame(frame);
+			}
+			function play() {
+				if (!rafId && canvas.isConnected) rafId = requestAnimationFrame(frame);
+			}
+
+			if (prefersReduced) {
+				/* Static single frame — texture without motion. */
+				gl.uniform2f(u.mouse, 0.5, 0.5);
+				gl.uniform1f(u.time, 0);
+				gl.drawArrays(gl.TRIANGLES, 0, 3);
+				return;
+			}
+
+			new IntersectionObserver(entries => {
+				inView = entries[0].isIntersecting;
+				if (inView) play();
+			}).observe(canvas);
+			document.addEventListener('visibilitychange', () => { if (!document.hidden) play(); });
+			play();
+		}
+
+		function init() {
+			document.querySelectorAll<HTMLCanvasElement>('canvas[data-effect]').forEach(mount);
+		}
+
+		document.addEventListener('DOMContentLoaded', init);
+		document.addEventListener('astro:after-swap', init);
+		if (document.readyState !== 'loading') init();
+	})();
+</script>
+
+<style is:global>
+	/* EffectCanvas chrome. The canvas always fills its nearest
+	 * positioned ancestor and never intercepts input — interactivity
+	 * is read-only cursor tracking bound on the parent. Fade variants
+	 * mask the effect into the page background so sections don't end
+	 * on a hard edge. */
+	.effect-canvas {
+		position: absolute;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		display: block;
+		pointer-events: none;
+	}
+	.effect-canvas--fade-bottom {
+		-webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent 100%);
+		mask-image: linear-gradient(to bottom, #000 55%, transparent 100%);
+	}
+	.effect-canvas--fade-top {
+		-webkit-mask-image: linear-gradient(to top, #000 55%, transparent 100%);
+		mask-image: linear-gradient(to top, #000 55%, transparent 100%);
+	}
+	.effect-canvas--fade-both {
+		-webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 18%, #000 82%, transparent 100%);
+		mask-image: linear-gradient(to bottom, transparent 0%, #000 18%, #000 82%, transparent 100%);
+	}
+</style>

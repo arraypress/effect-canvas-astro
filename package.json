@@ -1,0 +1,62 @@
+{
+  "name": "@arraypress/effect-canvas-astro",
+  "version": "1.0.0",
+  "description": "GPU shader background canvas for Astro — aurora/mesh/waves/grid/particles/grain/liquid effects, tinted from --color-accent, reduced-motion + offscreen-pause safe, with a CSS-gradient fallback when WebGL is unavailable.",
+  "type": "module",
+  "files": [
+    "src/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./EffectCanvas.astro": "./src/EffectCanvas.astro",
+    "./types": {
+      "types": "./src/types.ts",
+      "default": "./src/types.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "keywords": [
+    "astro",
+    "astro-component",
+    "webgl",
+    "shader",
+    "background",
+    "hero",
+    "effect",
+    "canvas",
+    "aurora",
+    "withastro"
+  ],
+  "author": "ArrayPress",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/arraypress/effect-canvas-astro.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "peerDependencies": {
+    "astro": "^6.0.0 || ^7.0.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "astro": "^6.3.7",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.7"
+  }
+}
