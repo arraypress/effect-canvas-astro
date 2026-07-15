@@ -43,6 +43,22 @@
  *                     CTAs/buttons via the `.cta--fx` hook — see
  *                     `productsConfig.ctaEffect` — but works as a
  *                     full section backdrop too.
+ *   - `'mesh-gradient'`
+ *                   — four colour spots on distinct trajectories,
+ *                     domain-warped by fbm noise and pulled through a
+ *                     slow vortex, blended by inverse-distance weight
+ *                     and finished with a fine grain. The modern
+ *                     "gradient mesh" hero wash. Softer and far more
+ *                     colourful than `mesh` (which is four discrete
+ *                     metaballs); this one has no visible spot edges.
+ *   - `'grain-gradient'`
+ *                   — noise-distorted colour BANDS under a heavy grain
+ *                     overlay. The popular grainy-gradient poster look.
+ *                     Reads as texture + colour rather than motion; run
+ *                     it at low `speed` for a near-static backdrop.
+ *
+ * `mesh-gradient` and `grain-gradient` use all FOUR colours (see
+ * `colors`); every other effect uses the first three.
  */
 export type EffectName =
 	| 'aurora'
@@ -51,7 +67,9 @@ export type EffectName =
 	| 'grid'
 	| 'particles'
 	| 'grain'
-	| 'liquid';
+	| 'liquid'
+	| 'mesh-gradient'
+	| 'grain-gradient';
 
 /**
  * One effect configuration. Used three ways:
@@ -70,11 +88,16 @@ export interface EffectConfig {
 	name: EffectName;
 
 	/**
-	 * Up to three CSS hex colours (e.g. `['#00e472', '#0d7377']`)
-	 * blended by the shader. Omit to derive all three from the live
-	 * theme tokens: c1 = `--color-accent`, c2 = accent shifted toward
-	 * the page background, c3 = accent hue-rotated for depth.
-	 * Non-hex values are ignored (tokens win) — shaders need raw RGB.
+	 * Up to FOUR CSS hex colours (e.g. `['#00e472', '#0d7377']`)
+	 * blended by the shader. Omit to derive them all from the live
+	 * theme tokens: c1 = `--color-accent`, c2 = accent dimmed toward
+	 * the page background, c3 = accent hue-rotated +36° for depth,
+	 * c4 = accent hue-rotated −32° and lifted. Non-hex values are
+	 * ignored (tokens win) — shaders need raw RGB.
+	 *
+	 * Only `mesh-gradient` and `grain-gradient` read the fourth; the
+	 * rest use the first three, so passing a 4th to them is harmless
+	 * and ignored.
 	 */
 	colors?: string[];
 
@@ -100,10 +123,37 @@ export interface EffectConfig {
 	opacity?: number;
 
 	/**
+	 * Render ONE frame and stop — no animation loop at all.
+	 *
+	 * Reach for this whenever the effect is wallpaper rather than a
+	 * feature: a full-page surface, a decorative panel, anything behind
+	 * body copy. Nobody perceives a background drifting at `speed: 0.5`,
+	 * and the loop is not free — a full-viewport shader can cost most of
+	 * a frame budget on an integrated GPU, permanently, on every page.
+	 *
+	 * It matters most for a `position: fixed` full-page canvas, where the
+	 * built-in offscreen pause CANNOT help: the canvas is always in the
+	 * viewport, so the IntersectionObserver never pauses it and it
+	 * renders forever.
+	 *
+	 * Freeze point is `frame`. Default: false.
+	 */
+	static?: boolean;
+
+	/**
+	 * Which moment to freeze at when `static` is true, in shader seconds.
+	 * The shaders are all time-varying, so this picks the composition —
+	 * `0` is usually the blandest (every trajectory starts at its origin).
+	 * Ignored when `static` is false. Default: 12.
+	 */
+	frame?: number;
+
+	/**
 	 * Mouse tracking. When true the shader receives a smoothed cursor
 	 * position uniform and warps gently toward it. Pointer events are
 	 * never captured — the canvas stays `pointer-events: none`.
-	 * No-op on touch devices and under reduced motion. Default: false.
+	 * No-op on touch devices, under reduced motion, and when `static`.
+	 * Default: false.
 	 */
 	interactive?: boolean;
 

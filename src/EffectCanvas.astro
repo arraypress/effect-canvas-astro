@@ -8,20 +8,23 @@
  *   </div>
  *
  * Renders a full-bleed, absolutely-positioned <canvas> that draws one
- * of six built-in fragment shaders (see `EffectName` in
- * src/types/effects.ts):
+ * of nine built-in fragment shaders (see `EffectName` in ./types):
  *
- *   aurora | mesh | waves | grid | particles | grain
+ *   aurora | mesh | waves | grid | particles | grain | liquid |
+ *   mesh-gradient | grain-gradient
  *
  * Props (all optional except `name` — see EffectConfig for full docs):
  *
  *   name         which shader to render
- *   colors       up to 3 hex colours; defaults derive from the LIVE
+ *   colors       up to 4 hex colours; defaults derive from the LIVE
  *                `--color-accent` token, so presets re-tint effects
- *                automatically
+ *                automatically. Only the two *-gradient shaders read
+ *                the 4th.
  *   speed        animation speed multiplier (0–4, default 1)
  *   intensity    brightness/contrast multiplier (0–2, default 1)
  *   opacity      uniform CSS opacity on the canvas (0–1, default 1)
+ *   static       render ONE frame, no loop — for wallpaper (default false)
+ *   frame        which moment to freeze at when static (default 12)
  *   interactive  smoothed mouse-tracking uniform (default false)
  *   blend        CSS mix-blend-mode (default 'normal')
  *   fade         edge mask: 'bottom' (default) | 'top' | 'both' | 'none'
@@ -58,6 +61,8 @@ const {
 	speed = 1,
 	intensity = 1,
 	opacity = 1,
+	static: isStatic = false,
+	frame = 12,
 	interactive = false,
 	blend = 'normal',
 	fade = 'bottom',
@@ -70,7 +75,9 @@ const {
 	data-effect-speed={speed}
 	data-effect-intensity={intensity}
 	data-effect-colors={colors && colors.length > 0 ? colors.join(',') : undefined}
-	data-effect-interactive={interactive ? 'on' : undefined}
+	data-effect-static={isStatic ? 'on' : undefined}
+	data-effect-frame={isStatic ? frame : undefined}
+	data-effect-interactive={interactive && !isStatic ? 'on' : undefined}
 	style={`opacity: ${opacity};${blend !== 'normal' ? ` mix-blend-mode: ${blend};` : ''}`}
 	aria-hidden="true"
 ></canvas>
@@ -117,7 +124,9 @@ const {
 		 * Uniform contract:
 		 *   u_res        canvas size in physical px
 		 *   u_time       seconds elapsed × the instance's speed prop
-		 *   u_c1..u_c3   the three effect colours (linear-ish RGB 0–1)
+		 *   u_c1..u_c4   the four effect colours (linear-ish RGB 0–1).
+		 *                Only the gradient shaders read u_c4; the rest
+		 *                use the first three.
 		 *   u_intensity  brightness multiplier from the intensity prop
 		 *   u_mouse      smoothed cursor in 0–1 UV space (0.5,0.5 idle)
 		 */
@@ -128,6 +137,7 @@ uniform float u_time;
 uniform vec3 u_c1;
 uniform vec3 u_c2;
 uniform vec3 u_c3;
+uniform vec3 u_c4;
 uniform float u_intensity;
 uniform vec2 u_mouse;
 float hash(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+45.32);return fract(p.x*p.y);}
@@ -135,6 +145,11 @@ float vnoise(vec2 p){vec2 i=floor(p);vec2 f=fract(p);f=f*f*(3.-2.*f);
 	float a=hash(i),b=hash(i+vec2(1.,0.)),c=hash(i+vec2(0.,1.)),d=hash(i+vec2(1.,1.));
 	return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);}
 float fbm(vec2 p){float v=0.;float a=.5;for(int i=0;i<5;i++){v+=a*vnoise(p);p*=2.03;a*=.5;}return v;}
+/* Rotate p around the origin by \`a\` radians. */
+vec2 rot(vec2 p,float a){float s=sin(a),c=cos(a);return mat2(c,-s,s,c)*p;}
+/* Vortex: rotate harder near the centre, falling off to nothing by
+   the edge, so the warp reads as a swirl rather than a spin. */
+vec2 swirl(vec2 p,float amt){float r=length(p);return rot(p,amt*(1.-smoothstep(0.,.9,r)));}
 `;
 
 		/**
@@ -295,6 +310,127 @@ void main(){
 	float a=clamp((g*.5+vig*.55)*.5*u_intensity,0.,1.);
 	gl_FragColor=vec4(col,a);
 }`,
+
+			/* Modern gradient-mesh wash: four colour spots drifting on
+			 * distinct trajectories, domain-warped by fbm and pulled
+			 * through a slow vortex, blended by INVERSE-DISTANCE weight so
+			 * there are no visible spot edges (unlike `mesh`, whose
+			 * metaballs read as discrete blobs). Finished with fine grain,
+			 * which is what stops big smooth gradients from banding on
+			 * 8-bit displays.
+			 *
+			 * Alpha tracks brightness — this composites OVER the page
+			 * rather than replacing it, which is what keeps text contrast
+			 * intact when it's used as a full-page surface. */
+			'mesh-gradient': `
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float ar=u_res.x/u_res.y;
+	vec2 p=(uv-.5)*vec2(ar,1.);
+	float t=u_time*.12;
+
+	/* Organic distortion — warp the sampling point by two decorrelated
+	   fbm fields so the spots deform instead of sliding rigidly. */
+	vec2 w=vec2(fbm(p*1.3+vec2(t,-t*.7)),fbm(p*1.3+vec2(-t*.6,t*.9)+4.2));
+	p+=(w-.5)*.6;
+
+	/* Slow vortex, oscillating so it never settles. */
+	p=swirl(p,.85*sin(t*.35));
+	p+=(u_mouse-.5)*vec2(ar,1.)*.10;
+
+	/* Four spots, each on its own orbit. */
+	vec2 s1=vec2(sin(t*.90)*.44,cos(t*.70)*.32);
+	vec2 s2=vec2(cos(t*.60+2.)*.48,sin(t*.80+1.)*.36);
+	vec2 s3=vec2(sin(t*.50+4.)*.42,cos(t*.90+3.)*.40);
+	vec2 s4=vec2(cos(t*.75+5.)*.38,sin(t*.55+2.5)*.30);
+
+	/* Inverse-distance weighting: every pixel is a blend of ALL four,
+	   weighted by proximity. The +.05 floor stops the weight blowing up
+	   at a spot centre (which would punch a hard dot). */
+	float w1=1./(dot(p-s1,p-s1)+.05);
+	float w2=1./(dot(p-s2,p-s2)+.05);
+	float w3=1./(dot(p-s3,p-s3)+.05);
+	float w4=1./(dot(p-s4,p-s4)+.05);
+	float sum=w1+w2+w3+w4;
+	vec3 col=(u_c1*w1+u_c2*w2+u_c3*w3+u_c4*w4)/sum;
+
+	/* COVERAGE — the load-bearing term. The weights above are normalised,
+	   so the hue blend alone returns a fully-saturated colour at EVERY
+	   pixel; left there it floods the page and swallows any text on top.
+	   This density field breaks it into soft pools with the page showing
+	   through between them, which is what a gradient mesh on a real site
+	   actually looks like. */
+	float cover=smoothstep(.30,.78,fbm(p*1.15+vec2(t*.5,-t*.35)+2.7));
+
+	/* Radial falloff so the wash melts out rather than ending flat. */
+	float vig=1.-smoothstep(.15,.95,length((uv-.5)*vec2(ar,1.)));
+
+	/* Fine grain — dithers the gradient (big smooth ramps band badly on
+	   8-bit displays) and adds the paper texture. */
+	float g=hash(uv*u_res*.65+fract(u_time*.35)*vec2(19.,37.));
+
+	/* The mask drives ALPHA ONLY; the colour keeps full chroma.
+	   This is the whole trick, and getting it wrong is why washes look
+	   dirty: the browser composites this canvas over the page as
+	   col*a + page*(1-a). Multiplying the COLOUR by the mask (the
+	   obvious move) darkens it toward black while alpha drops too, so
+	   over a light page you composite a dark colour at partial alpha —
+	   i.e. grey mud. Keep the colour saturated, mask the alpha, and the
+	   same shader gives a pastel tint on white and a deep pool on black
+	   with no per-mode branching. */
+	float mask=cover*vig*(1.+(g-.5)*.4);
+	float a=clamp(mask*u_intensity,0.,1.);
+	gl_FragColor=vec4(clamp(col,0.,1.),a);
+}`,
+
+			/* Grainy-gradient poster look: a smooth scalar field is banded
+			 * into colour steps, the band boundaries are chewed up by
+			 * noise, and the whole thing sits under a heavy grain overlay.
+			 * Reads as texture + colour rather than motion — run it at low
+			 * `speed` (0.2–0.4) for a near-static backdrop.
+			 *
+			 * `intensity` drives how hard the noise distorts the bands;
+			 * alpha tracks brightness so it composites over the page. */
+			'grain-gradient': `
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float ar=u_res.x/u_res.y;
+	vec2 p=(uv-.5)*vec2(ar,1.);
+	float t=u_time*.10;
+
+	/* The underlying field: a diagonal sweep bent by low-frequency fbm.
+	   This is what the colour ramp is read along. */
+	float field=dot(p,normalize(vec2(.75,1.)))*.9+.5;
+	field+=(fbm(p*1.15+vec2(t*.8,-t*.5))-.5)*1.15;
+	field+=(fbm(p*2.4-vec2(t*.4,t*.7)+9.1)-.5)*.45;
+
+	/* Chew the band edges with high-frequency noise, scaled by
+	   intensity — this is the "grainy distortion" rather than a clean
+	   posterisation. */
+	float chew=(hash(uv*u_res*.32+floor(u_time*8.)*vec2(11.,23.))-.5);
+	field+=chew*.06*u_intensity;
+
+	/* Read the 4-stop ramp. smoothstep between stops keeps the bands
+	   soft; the mix chain is the ramp itself. */
+	float f=clamp(field,0.,1.);
+	vec3 col=mix(u_c2,u_c1,smoothstep(.00,.38,f));
+	col=mix(col,u_c3,smoothstep(.34,.68,f));
+	col=mix(col,u_c4,smoothstep(.62,1.,f));
+
+	/* Radial falloff so it melts into the page. */
+	float vig=1.-smoothstep(.2,1.1,length(p));
+
+	/* Heavy grain — the signature of the look. It rides in the ALPHA
+	   rather than being added to the colour, for the same reason as
+	   mesh-gradient (see the note there): grain added to the colour
+	   greys out on a light page, grain in the alpha reads as texture on
+	   either. */
+	float g=hash(uv*u_res*.9+fract(u_time*.5)*vec2(29.,13.));
+
+	float mask=vig*(1.+(g-.5)*.85);
+	float a=clamp(mask*u_intensity,0.,1.);
+	gl_FragColor=vec4(clamp(col,0.,1.),a);
+}`,
 		};
 
 		/* ---------------------------------------------------------- *
@@ -342,28 +478,54 @@ void main(){
 			return [f(h + 1 / 3), f(h), f(h - 1 / 3)];
 		}
 
+		/** Linear blend from `a` toward `b` by `t` (0–1). */
+		function mix(
+			a: [number, number, number],
+			b: [number, number, number],
+			t: number,
+		): [number, number, number] {
+			return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+		}
+
 		/**
-		 * Resolve the three shader colours for one canvas. Priority:
+		 * Resolve the four shader colours for one canvas. Priority:
 		 * explicit data-effect-colors entries, then token-derived
-		 * defaults — c1 = `--color-accent`, c2 = accent dimmed 55%,
-		 * c3 = accent hue-rotated 36° for depth. Reading the token at
-		 * mount time (not build time) means preset/theme switches
-		 * re-tint effects with zero config.
+		 * defaults — c1 = `--color-accent`, c2 = accent shifted 55%
+		 * toward `--color-bg`, c3 = accent hue-rotated +36° for depth,
+		 * c4 = accent hue-rotated −32° and lifted 20% so the gradient
+		 * shaders get a fourth stop that reads as a distinct colour
+		 * rather than a shade of c3. Reading the tokens at mount time
+		 * (not build time) means preset/theme switches re-tint effects
+		 * with zero config.
+		 *
+		 * c2 mixes toward the PAGE BACKGROUND, not toward black. It used
+		 * to be `accent * 0.45`, which is the same thing only while the
+		 * background IS black — true of every theme this shipped in, so
+		 * the bug stayed hidden. On a LIGHT background that produced a
+		 * dark stop, and compositing it over white turned every effect
+		 * into grey-green mud. Mixing toward the real background makes
+		 * c2 a pale tint on light pages and a deep shade on dark ones,
+		 * which is what the docs always claimed it did. For a black
+		 * background the two formulas are identical, so dark themes see
+		 * no change.
 		 */
 		function resolveColors(el: HTMLElement): [number, number, number][] {
 			const styles = getComputedStyle(document.documentElement);
 			const accent =
 				parseColor(styles.getPropertyValue('--color-accent')) ?? [0, 0.89, 0.45];
+			const bg = parseColor(styles.getPropertyValue('--color-bg')) ?? [0, 0, 0];
+			const lifted = hueRotate(accent, -32).map(c => Math.min(1, c * 1.2)) as [number, number, number];
 			const defaults: [number, number, number][] = [
 				accent,
-				accent.map(c => c * 0.45) as [number, number, number],
+				mix(accent, bg, 0.55),
 				hueRotate(accent, 36),
+				lifted,
 			];
 			const custom = (el.dataset.effectColors ?? '')
 				.split(',')
 				.map(parseColor)
 				.filter((c): c is [number, number, number] => c !== null);
-			return [custom[0] ?? defaults[0], custom[1] ?? defaults[1], custom[2] ?? defaults[2]];
+			return defaults.map((d, i) => custom[i] ?? d);
 		}
 
 		/* ---------------------------------------------------------- *
@@ -412,6 +574,8 @@ void main(){
 			const speed = Math.min(4, Math.max(0, Number(canvas.dataset.effectSpeed ?? 1) || 1));
 			const intensity = Math.min(2, Math.max(0, Number(canvas.dataset.effectIntensity ?? 1) || 1));
 			const interactive = canvas.dataset.effectInteractive === 'on';
+			const isStatic = canvas.dataset.effectStatic === 'on';
+			const staticFrame = Number(canvas.dataset.effectFrame ?? 12) || 0;
 			const colors = resolveColors(canvas);
 
 			const gl = canvas.getContext('webgl', {
@@ -452,6 +616,10 @@ void main(){
 				c1:        gl.getUniformLocation(prog, 'u_c1'),
 				c2:        gl.getUniformLocation(prog, 'u_c2'),
 				c3:        gl.getUniformLocation(prog, 'u_c3'),
+				/* Null for shaders that don't reference u_c4 — GL strips
+				 * unused uniforms at link time. uniform3f tolerates a null
+				 * location (it's a no-op), so this needs no guard. */
+				c4:        gl.getUniformLocation(prog, 'u_c4'),
 				intensity: gl.getUniformLocation(prog, 'u_intensity'),
 				mouse:     gl.getUniformLocation(prog, 'u_mouse'),
 				/* Only resolves for shaders that declare u_rip (liquid). */
@@ -460,6 +628,7 @@ void main(){
 			gl.uniform3f(u.c1, ...colors[0]);
 			gl.uniform3f(u.c2, ...colors[1]);
 			gl.uniform3f(u.c3, ...colors[2]);
+			gl.uniform3f(u.c4, ...colors[3]);
 			gl.uniform1f(u.intensity, intensity);
 
 			/* --- sizing (DPR-capped, follows the element box) --- */
@@ -543,11 +712,24 @@ void main(){
 				if (!rafId && canvas.isConnected) rafId = requestAnimationFrame(frame);
 			}
 
-			if (prefersReduced) {
-				/* Static single frame — texture without motion. */
-				gl.uniform2f(u.mouse, 0.5, 0.5);
-				gl.uniform1f(u.time, 0);
-				gl.drawArrays(gl.TRIANGLES, 0, 3);
+			/* One frame, then nothing — no rAF loop is ever created.
+			 *
+			 * Two ways in: the caller asked for `static` (wallpaper), or the
+			 * visitor asked for reduced motion. Reduced-motion freezes at 0;
+			 * an explicit static frame picks its own moment, since 0 is where
+			 * every trajectory starts and tends to look bland.
+			 *
+			 * Re-renders on resize, because a resize resets the drawing buffer
+			 * and would otherwise leave the canvas blank — the animated path
+			 * never notices since its next frame repaints anyway. */
+			if (isStatic || prefersReduced) {
+				const draw = () => {
+					gl.uniform2f(u.mouse, 0.5, 0.5);
+					gl.uniform1f(u.time, prefersReduced ? 0 : staticFrame);
+					gl.drawArrays(gl.TRIANGLES, 0, 3);
+				};
+				draw();
+				new ResizeObserver(draw).observe(canvas);
 				return;
 			}
 
