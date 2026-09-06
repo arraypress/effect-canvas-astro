@@ -322,6 +322,258 @@ void main(){
 			 * Alpha tracks brightness — this composites OVER the page
 			 * rather than replacing it, which is what keeps text contrast
 			 * intact when it's used as a full-page surface. */
+			/* A glossy sheet rippling away to a horizon — the "waterPlane"
+			   look, done as a raked ground plane in a fragment shader
+			   rather than a displaced 3D mesh. The perspective divide is
+			   what sells it: sampling density rises with distance, so the
+			   ripples compress toward the horizon the way real perspective
+			   does. A finite-difference normal off the same height field
+			   gives the specular sheen without a light rig.
+
+			   Masks ALPHA rather than multiplying the colour down (the
+			   lesson from mesh-gradient), so it composites cleanly on a
+			   light page instead of turning grey. */
+			/* The flat "plane" of the set — a silk sheet facing the camera,
+			   displaced by two noise octaves and lit. No perspective
+			   divide (that's water-plane's job); the read here is broad
+			   diagonal colour flow with a soft specular roll across it. */
+			'gradient-plane': `
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float ar=u_res.x/u_res.y;
+	vec2 p=(uv-.5)*vec2(ar,1.);
+	float t=u_time*.16;
+
+	/* Slight rake so the flow runs diagonally rather than square to
+	   the viewport — square bands read as a CSS gradient, not a mesh. */
+	vec2 q=rot(p,.42)*1.25;
+	q+=(u_mouse-.5)*vec2(ar,1.)*.12;
+
+	float h=fbm(q+vec2(t*.7,-t*.5))+.5*fbm(q*2.3+vec2(-t*.4,t*.8));
+
+	float e=.03;
+	float hx=fbm(q+vec2(e,0.)+vec2(t*.7,-t*.5))+.5*fbm((q+vec2(e,0.))*2.3+vec2(-t*.4,t*.8));
+	float hy=fbm(q+vec2(0.,e)+vec2(t*.7,-t*.5))+.5*fbm((q+vec2(0.,e))*2.3+vec2(-t*.4,t*.8));
+	vec3 n=normalize(vec3((h-hx)*2.6,(h-hy)*2.6,1.));
+
+	float ramp=clamp(h*.9+.1,0.,1.);
+	vec3 col=mix(u_c1,u_c2,smoothstep(.18,.82,ramp));
+	float spec=pow(max(dot(n,normalize(vec3(-.3,.5,.8))),0.),14.);
+	col=mix(col,u_c3,spec*.5);
+
+	/* Alpha-masked (never colour-multiplied) so it survives a light page. */
+	float vig=1.-smoothstep(.30,1.05,length(p));
+	float a=vig*(.30+.50*ramp+spec*.45)*u_intensity;
+
+	gl_FragColor=vec4(col*u_intensity,clamp(a,0.,1.));
+}
+`,
+
+			/* The "sphere" of the set — an implicit orb rather than a
+			   displaced mesh: z is solved from the circle equation, the
+			   normal comes from that, and noise perturbs it. Cheaper than
+			   ray-marching and indistinguishable at this softness. The rim
+			   term is what stops it reading as a flat pasted circle. */
+			'gradient-sphere': `
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float ar=u_res.x/u_res.y;
+	vec2 p=(uv-.5)*vec2(ar,1.);
+	float t=u_time*.15;
+
+	vec2 c=vec2(.06,-.02)+(u_mouse-.5)*vec2(ar,1.)*.06;
+	float R=.66;
+	vec2 rel=p-c;
+	float r=length(rel);
+
+	/* Surface normal from the implicit sphere. Outside the radius we
+	   clamp to the silhouette so the rim glow still has a normal. */
+	float z=sqrt(max(R*R-r*r,0.));
+	vec3 n=normalize(vec3(rel,z+1e-4));
+
+	/* Two octaves over the surface, advected so it churns in place, then
+	   perturb the normal by their gradient so the light reacts to the
+	   churn instead of sliding over a perfect sphere. */
+	float nz=fbm(n.xy*2.4+vec2(t,-t*.8))+.5*fbm(n.xy*5.0+vec2(-t*.7,t*1.1));
+	float e=.045;
+	float nzx=fbm((n.xy+vec2(e,0.))*2.4+vec2(t,-t*.8))+.5*fbm((n.xy+vec2(e,0.))*5.0+vec2(-t*.7,t*1.1));
+	float nzy=fbm((n.xy+vec2(0.,e))*2.4+vec2(t,-t*.8))+.5*fbm((n.xy+vec2(0.,e))*5.0+vec2(-t*.7,t*1.1));
+	n=normalize(n+vec3((nz-nzx)*.55,(nz-nzy)*.55,0.));
+
+	float ramp=clamp(nz*.85+.12+n.y*.25,0.,1.);
+	vec3 col=mix(u_c1,u_c2,smoothstep(.16,.86,ramp));
+	float spec=pow(max(dot(n,normalize(vec3(-.35,.6,.72))),0.),22.);
+	col=mix(col,u_c3,spec*.6);
+
+	/* Soft body + a rim that lifts the silhouette. */
+	float body=1.-smoothstep(R*.72,R*1.04,r);
+	float rim=smoothstep(R*.80,R*1.0,r)*(1.-smoothstep(R*1.0,R*1.22,r));
+	float a=(body*(.34+.46*ramp+spec*.5)+rim*.30)*u_intensity;
+
+	gl_FragColor=vec4(col*u_intensity,clamp(a,0.,1.));
+}
+`,
+			/* Vertical light beams — the "curtain" hero background. The whole
+			   trick is that the noise is sampled across X ONLY: with no y
+			   term the value is constant down each column, which is what
+			   makes a band read as a beam rather than a blob. Three
+			   octaves at different widths and drift speeds keep it from
+			   looking like a repeating stripe pattern, and a top-down
+			   falloff sells "light coming from above".
+
+			   Alpha-masked, so it composites over any page colour. */
+			/* Band-lens refraction — a flowing two-colour gradient sampled
+			   through a grid of lens cells that are ~100x wider than they
+			   are tall. That aspect ratio is the whole effect: a cell
+			   spanning the full width but 1/100th of the height smears the
+			   gradient VERTICALLY, so a smooth colour field resolves into
+			   tall irregular streaks with bright refracted edges.
+
+			   Two properties fall out of the geometry rather than being
+			   drawn in, which is why this reads as light rather than as
+			   stripes: streak WIDTH varies with the local gradient slope
+			   (so the bands are uneven), and the brightest pixels land at
+			   cell edges where the lens warp is strongest.
+
+			   Technique measured from a reference implementation; the
+			   parameter defaults below are its shipped values. */
+			'band-lens': `
+/* One cell of the lens grid. Tiling with fract() puts every fragment in
+   its own cell, then the sphere equation gives the warp for that cell. */
+vec2 bandLens(vec2 p, float spacingX, float spacingY, float radiusSq){
+	vec2 c;
+	c.x = fract(p.x/spacingX + .5)*spacingX - spacingX*.5;
+	c.y = fract(p.y/spacingY + .5)*spacingY - spacingY*.5;
+	float sp = radiusSq - c.x*c.x - c.y*c.y;
+	float amount = smoothstep(-.1, .05, sp);
+	float lens = sqrt(max(sp, -sp*.1)/.3);
+	float warp = mix(1., lens, amount);
+	vec2 out_ = p;
+	out_.x += c.x*warp - c.x;
+	out_.y *= warp;          /* the vertical smear */
+	return out_;
+}
+
+/* Smooth flowing scalar in 0-1, from three interfering directional waves.
+   Cheaper and far smoother than fbm, which is what keeps the streaks clean
+   instead of grainy. */
+float flowField(vec2 uv, float t){
+	vec2 d1 = vec2(cos(1.31), sin(1.31));
+	vec2 d2 = vec2(cos(4.02), sin(4.02));
+	/* Time terms are negated relative to the obvious reading: the field
+	   drifts right-to-left. Flip the signs on the two t terms to reverse
+	   it — that is the only thing controlling travel direction. */
+	float a = dot(uv,d1) + sin(dot(uv,d2)*2.1 - t)*.30 - t*.20;
+	float b = dot(uv,d2.yx) + cos(dot(uv,d1.yx)*1.9 + t*.80)*.25;
+	float v = sin(a*1.5)*.5 + .5;
+	v += cos(b*1.2)*1.3;
+	v += sin(dot(uv,d1+d2)*2.4 - t*3.5)*1.2;
+	return smoothstep(0., 4.12, v);
+}
+
+void main(){
+	vec2 r = u_res;
+	/* Aspect-correct, origin-centred — matches the reference's framing. */
+	vec2 p = (gl_FragCoord.xy*2. - r)/r.y;
+	float t = u_time*.30;
+
+	/* Deliberately NOT rotated. The beams are plumb — the reference sets
+	   no rotation uniform, and tilting them reads as a swipe rather than
+	   as light falling. The irregularity comes from the flow field, not
+	   from any angle. */
+	float scale = 3.7;
+	vec2 warped = bandLens(p*scale, 1.0, 0.01, 0.41*0.41);
+	float g = flowField(warped/scale, t*.8);
+
+	/* Two-stop ramp: accent into the page tone. A third colour would mud
+	   the streaks — the reference ships two for the same reason. */
+	vec3 col = mix(u_c2, u_c1, g);
+
+	/* ALPHA carries the streaks, never a darkened colour (see the note on
+	   mesh-gradient). Squared so dim areas fall to fully transparent and
+	   the page black shows through between beams. */
+	float a = g*g*u_intensity;
+
+	gl_FragColor = vec4(col, clamp(a, 0., 1.));
+}
+`,
+			'beams': `
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float t=u_time*.10;
+
+	/* Sampled on X only — constant down each column. The second
+	   coordinate is time, so beams breathe in place instead of sliding. */
+	float b =      smoothstep(.42,1.,vnoise(vec2(uv.x* 5.0,       t*.45)));
+	b += .70*      smoothstep(.50,1.,vnoise(vec2(uv.x*13.0+ 9.1,  t*.30)));
+	b += .45*      smoothstep(.58,1.,vnoise(vec2(uv.x*27.0+ 3.7,  t*.65)));
+	b += .28*      smoothstep(.62,1.,vnoise(vec2(uv.x*53.0+21.3,  t*.85)));
+	b/=2.43;
+
+	/* Light falls from the top. gl_FragCoord.y is bottom-up, so uv.y=1
+	   is the top edge — raise it to bias the glow into the upper third. */
+	float fall=pow(clamp(uv.y,0.,1.),1.9);
+
+	/* A slow vertical wash breaks the columns up so they don't read as
+	   hard bars all the way down. */
+	float wash=.72+.28*vnoise(vec2(uv.x*3.0,uv.y*1.6-t*.5));
+
+	float g=b*fall*wash;
+
+	/* Hot cores tend toward the third colour, the body sits between the
+	   first two — that's what gives a beam its centre. */
+	vec3 col=mix(u_c1,u_c2,smoothstep(.10,.55,g));
+	col=mix(col,u_c3,smoothstep(.55,.95,g)*.75);
+
+	float a=clamp(g*1.35,0.,1.)*u_intensity;
+	gl_FragColor=vec4(col*u_intensity,a);
+}
+`,
+			'water-plane': `
+void main(){
+	vec2 uv=gl_FragCoord.xy/u_res;
+	float ar=u_res.x/u_res.y;
+	float t=u_time*.20;
+
+	/* Everything above the horizon is empty sky — bail early so the
+	   canvas stays transparent there and the hero text keeps its
+	   contrast. */
+	float horizon=.72;
+	float d=horizon-uv.y;
+	if(d<=.001){ gl_FragColor=vec4(0.); return; }
+
+	/* Perspective: depth explodes as we approach the horizon line. The
+	   +.10 floor caps it so the far field doesn't alias into noise. */
+	float depth=1./(d*5.5+.10);
+	vec2 pp=vec2((uv.x-.5)*ar*depth,depth)*1.2;
+
+	/* Height field — two decorrelated octaves drifting toward camera. */
+	vec2 flow=vec2(0.,-t*1.7);
+	float h=fbm(pp+flow)+.5*fbm(pp*2.1+vec2(t*.6,-t*1.2));
+
+	/* Normal by finite difference on the same field. The step scales
+	   with depth so it stays roughly screen-constant. */
+	float e=.035*depth;
+	float hx=fbm(pp+vec2(e,0.)+flow)+.5*fbm((pp+vec2(e,0.))*2.1+vec2(t*.6,-t*1.2));
+	float hy=fbm(pp+vec2(0.,e)+flow)+.5*fbm((pp+vec2(0.,e))*2.1+vec2(t*.6,-t*1.2));
+	vec3 n=normalize(vec3((h-hx)*3.4,(h-hy)*3.4,1.));
+
+	/* Colour ramp across the height, then a specular lift toward the
+	   third colour so crests read as sheen rather than a lighter tint. */
+	float ramp=clamp(h*.85+.15,0.,1.);
+	vec3 col=mix(u_c1,u_c2,smoothstep(.15,.85,ramp));
+	float spec=pow(max(dot(n,normalize(vec3(.35,.55,.75))),0.),18.);
+	col=mix(col,u_c3,spec*.55);
+
+	/* Coverage: fade the sheet out at the horizon and at the very
+	   bottom edge so it sits in the layout instead of ending flat. */
+	float far=smoothstep(.0,.16,d);
+	float near=1.-smoothstep(.72,1.0,d);
+	float a=far*near*(.34+.46*ramp+spec*.5)*u_intensity;
+
+	gl_FragColor=vec4(col*u_intensity,clamp(a,0.,1.));
+}
+`,
 			'mesh-gradient': `
 void main(){
 	vec2 uv=gl_FragCoord.xy/u_res;

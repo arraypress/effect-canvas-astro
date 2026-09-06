@@ -69,7 +69,12 @@ export type EffectName =
 	| 'grain'
 	| 'liquid'
 	| 'mesh-gradient'
-	| 'grain-gradient';
+	| 'grain-gradient'
+	| 'water-plane'
+	| 'gradient-plane'
+	| 'gradient-sphere'
+	| 'beams'
+	| 'band-lens';
 
 /**
  * One effect configuration. Used three ways:
