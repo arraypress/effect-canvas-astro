@@ -5,7 +5,50 @@ All notable changes to `@arraypress/effect-canvas-astro` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.1.0] — Unreleased
+## [1.2.0] — 2026-09-07
+
+### Added
+
+- **`band-lens`** — the signature one. A flowing two-colour field is sampled
+  through a grid of lens cells roughly 100× wider than they are tall; that
+  aspect ratio smears the gradient vertically, so a smooth field resolves into
+  tall irregular light streaks with bright refracted edges. Two properties fall
+  out of the geometry rather than being drawn: streak WIDTH varies with the
+  local gradient slope, and the brightest pixels land on cell boundaries. That
+  is why it reads as light rather than as stripes.
+
+  Deliberately NOT rotated — plumb beams read as light falling, tilted ones
+  read as a swipe. The irregularity comes from the flow field, not an angle.
+
+  Takes two colours, not four. A third muddies the streaks.
+
+- **`water-plane`**, **`gradient-plane`**, **`gradient-sphere`** — the three
+  ShaderGradient mesh types as fragment shaders, with no React and no three.js.
+  `water-plane` uses a perspective divide onto a raked ground plane, so ripples
+  compress toward the horizon; `gradient-sphere` solves z from the circle
+  equation rather than ray-marching, which is indistinguishable at this
+  softness and far cheaper.
+
+- **`beams`** — a vertical light curtain from 1D noise sampled across X only
+  (no y term, which is what makes a band read as a beam) with a top-down
+  falloff. Roughly one sample against `band-lens`'s refraction, so reach for
+  this when the surface is decoration rather than the subject.
+
+### Notes
+
+Every new shader masks ALPHA rather than multiplying colour down, following
+the `mesh-gradient` precedent — so they composite cleanly on a light page
+instead of turning grey.
+
+Two things that will bite anyone editing this file:
+
+- **A backtick inside a GLSL comment terminates the template literal** and
+  breaks the Astro compiler with a parse error pointing at the comment. The
+  shaders live in template strings; write `the step` not `` `e` ``.
+- A runtime shader list cannot be derived from the `EffectName` type (erased at
+  build). Adding a shader means adding it in both places.
+
+## [1.1.0] — 2026-07-15
 
 ### Added
 
@@ -50,7 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shade on dark ones. **Dark themes are unaffected** — for a black background
   the two formulas are numerically identical.
 
-## [1.0.0] — Unreleased
+## [1.0.0] — 2026-06-22
 
 ### Added
 
