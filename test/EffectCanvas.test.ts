@@ -93,7 +93,7 @@ describe('<EffectCanvas>', () => {
 		/* Bump when a shader is added. The count is deliberate: it catches a
 		 * name added to the union but never given a body (the loop below), AND
 		 * a body added without a union entry (which the loop cannot see). */
-		expect(union.length).toBe(14);
+		expect(union.length).toBe(15);
 		for (const name of union) {
 			/* Keys are bare (mesh:) or quoted ('mesh-gradient':) depending on
 			 * whether the name is a valid identifier. */

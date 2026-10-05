@@ -5,6 +5,27 @@ All notable changes to `@arraypress/effect-canvas-astro` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-10-05
+
+### Added
+
+- **`silk`** — flowing domain-warped folds, like a sheet of silk drifting
+  across the frame, with a soft sheen along the crests. Built after
+  paper.design's `warp` was judged to animate badly as a hero: its large folds
+  stay in place while their edges boil, because every swirl pass moves at the
+  same rate. Here the two WARP FIELDS themselves flow, each at its own rate and
+  direction, so whole folds travel and the detail rides with them (measured:
+  ~23% of pixels changing per 2s against warp's ~19%, and the change is
+  structural rather than shimmer). Three octaves, not five — the extra octaves
+  read as marbled smoke, not cloth. The troughs keep a floor of the deep colour
+  (`c4`) so it reads as a sheet rather than faint pools, and a copy-safe dip
+  calms the centre where hero text sits. Uses all four colours; `interactive`
+  leans the sheet toward the cursor.
+
+### Fixed
+
+- README's `name` table listed only nine effects; it now lists all fifteen.
+
 ## [1.2.0] — 2026-09-07
 
 ### Added

@@ -5,8 +5,10 @@ or any section and it renders one of nine animated WebGL effects, tinted from
 your theme's `--color-accent` token — so switching brand colours re-tints every
 effect automatically, with no per-effect config.
 
-- **Nine effects** — `aurora`, `mesh`, `waves`, `grid`, `particles`, `grain`, `liquid`,
+- **Fifteen effects** — `aurora`, `mesh`, `waves`, `grid`, `particles`, `grain`, `liquid`,
+  `water-plane`, `gradient-plane`, `gradient-sphere`, `beams`, `band-lens`,
   plus `mesh-gradient` and `grain-gradient` (the modern multi-colour gradient washes)
+  and `silk` (flowing domain-warped folds that travel across the frame)
 - **Token-driven colour** — derives its palette from the live `--color-accent`
   CSS variable at mount; pass explicit `colors` to override
 - **Reduced-motion safe** — renders a single static frame under
@@ -44,7 +46,7 @@ import { EffectCanvas } from '@arraypress/effect-canvas-astro';
 
 | Prop | Type | Default | Description |
 |---|---|---|---|
-| `name` | `'aurora' \| 'mesh' \| 'waves' \| 'grid' \| 'particles' \| 'grain' \| 'liquid' \| 'mesh-gradient' \| 'grain-gradient'` | — | Which shader to render (required) |
+| `name` | `'aurora' \| 'mesh' \| 'waves' \| 'grid' \| 'particles' \| 'grain' \| 'liquid' \| 'mesh-gradient' \| 'grain-gradient' \| 'water-plane' \| 'gradient-plane' \| 'gradient-sphere' \| 'beams' \| 'band-lens' \| 'silk'` | — | Which shader to render (required) |
 | `colors` | `string[]` | from tokens | Up to four hex colours blended by the shader. Omit to derive from `--color-accent`. Only the two `*-gradient` shaders read the fourth |
 | `speed` | `number` | `1` | Animation speed multiplier (clamped 0–4) |
 | `intensity` | `number` | `1` | Visual strength (brightness/contrast), not opacity |

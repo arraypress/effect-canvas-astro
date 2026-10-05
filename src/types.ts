@@ -56,8 +56,14 @@
  *                     overlay. The popular grainy-gradient poster look.
  *                     Reads as texture + colour rather than motion; run
  *                     it at low `speed` for a near-static backdrop.
+ *   - `'silk'`      — flowing domain-warped folds, like a sheet of silk
+ *                     drifting across the frame, with a sheen on the
+ *                     crests. The warp fields themselves flow, so the
+ *                     big folds TRAVEL rather than churning in place.
+ *                     Interactive-friendly (the sheet leans toward the
+ *                     cursor).
  *
- * `mesh-gradient` and `grain-gradient` use all FOUR colours (see
+ * `mesh-gradient`, `grain-gradient` and `silk` use all FOUR colours (see
  * `colors`); every other effect uses the first three.
  */
 export type EffectName =
@@ -74,7 +80,8 @@ export type EffectName =
 	| 'gradient-plane'
 	| 'gradient-sphere'
 	| 'beams'
-	| 'band-lens';
+	| 'band-lens'
+	| 'silk';
 
 /**
  * One effect configuration. Used three ways:
@@ -100,7 +107,7 @@ export interface EffectConfig {
 	 * c4 = accent hue-rotated −32° and lifted. Non-hex values are
 	 * ignored (tokens win) — shaders need raw RGB.
 	 *
-	 * Only `mesh-gradient` and `grain-gradient` read the fourth; the
+	 * Only `mesh-gradient`, `grain-gradient` and `silk` read the fourth; the
 	 * rest use the first three, so passing a 4th to them is harmless
 	 * and ignored.
 	 */
